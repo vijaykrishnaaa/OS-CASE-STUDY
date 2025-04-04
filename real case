@@ -1,0 +1,319 @@
+#include <Arduino.h>
+#include <stdlib.h>
+#include <stdbool.h>
+
+// Constants
+#define MAX_PASSENGERS 30
+#define MAX_QUEUE_SIZE 20
+#define NUM_CHECKIN_COUNTERS 3
+#define NUM_SECURITY_LANES 2
+#define NUM_BOARDING_ZONES 4
+#define TIME_QUANTUM 2
+
+// Priorities
+#define VIP_PRIORITY 1
+#define BUSINESS_PRIORITY 2
+#define REGULAR_PRIORITY 3
+#define REDUCED_MOBILITY_PRIORITY 2
+
+// Status codes
+#define STATUS_ARRIVED 0
+#define STATUS_CHECKED_IN 1
+#define STATUS_BAGGAGE_DROPPED 2
+#define STATUS_SECURITY_CLEARED 3
+#define STATUS_BOARDED 4
+
+typedef struct {
+    int id;
+    int priority;
+    int processingTime;
+    int remainingTime;
+    int waitingTime;
+    bool hasBaggage;
+    int status;
+    int boardingZone;
+} Passenger;
+
+// FIFO Queue
+typedef struct {
+    Passenger data[MAX_QUEUE_SIZE];
+    int front, rear, size;
+} FifoQueue;
+
+// Priority Queue
+typedef struct {
+    Passenger data[MAX_QUEUE_SIZE];
+    int size;
+} PriorityQueue;
+
+// Circular Queue
+typedef struct {
+    Passenger data[MAX_QUEUE_SIZE];
+    int front, rear, count;
+} CircularQueue;
+
+// Parallel Queue
+typedef struct {
+    FifoQueue lanes[NUM_SECURITY_LANES];
+    int processedCount[NUM_SECURITY_LANES];
+} ParallelQueue;
+
+// Round Robin Queue
+typedef struct {
+    CircularQueue zones[NUM_BOARDING_ZONES];
+    int currentZone;
+} RoundRobinQueue;
+
+// Global Queues
+FifoQueue selfCheckInQueue;
+PriorityQueue mainCheckInQueue;
+CircularQueue baggageQueue;
+ParallelQueue securityQueue;
+RoundRobinQueue boardingQueue;
+
+// Stats
+int totalPassengers = 0, checkedInPassengers = 0;
+int baggageDroppedPassengers = 0, securityClearedPassengers = 0, boardedPassengers = 0;
+int currentTime = 0;
+
+// FIFO Queue Functions
+void initFifoQueue(FifoQueue *q) {
+    q->front = 0; q->rear = -1; q->size = 0;
+}
+bool isFifoQueueEmpty(FifoQueue *q) { return q->size == 0; }
+bool isFifoQueueFull(FifoQueue *q) { return q->size == MAX_QUEUE_SIZE; }
+
+bool fifoEnqueue(FifoQueue *q, Passenger p) {
+    if (isFifoQueueFull(q)) return false;
+    q->rear = (q->rear + 1) % MAX_QUEUE_SIZE;
+    q->data[q->rear] = p;
+    q->size++;
+    return true;
+}
+
+bool fifoDequeue(FifoQueue *q, Passenger *p) {
+    if (isFifoQueueEmpty(q)) return false;
+    *p = q->data[q->front];
+    q->front = (q->front + 1) % MAX_QUEUE_SIZE;
+    q->size--;
+    return true;
+}
+
+// Priority Queue Functions
+void initPriorityQueue(PriorityQueue *q) { q->size = 0; }
+bool isPriorityQueueEmpty(PriorityQueue *q) { return q->size == 0; }
+bool isPriorityQueueFull(PriorityQueue *q) { return q->size == MAX_QUEUE_SIZE; }
+
+bool priorityEnqueue(PriorityQueue *q, Passenger p) {
+    if (isPriorityQueueFull(q)) return false;
+    int i = q->size - 1;
+    while (i >= 0 && q->data[i].priority > p.priority) {
+        q->data[i + 1] = q->data[i];
+        i--;
+    }
+    q->data[i + 1] = p;
+    q->size++;
+    return true;
+}
+
+bool priorityDequeue(PriorityQueue *q, Passenger *p) {
+    if (isPriorityQueueEmpty(q)) return false;
+    *p = q->data[0];
+    for (int i = 1; i < q->size; i++) q->data[i - 1] = q->data[i];
+    q->size--;
+    return true;
+}
+
+// Circular Queue Functions
+void initCircularQueue(CircularQueue *q) {
+    q->front = 0; q->rear = -1; q->count = 0;
+}
+bool isCircularQueueEmpty(CircularQueue *q) { return q->count == 0; }
+bool isCircularQueueFull(CircularQueue *q) { return q->count == MAX_QUEUE_SIZE; }
+
+bool circularEnqueue(CircularQueue *q, Passenger p) {
+    if (isCircularQueueFull(q)) return false;
+    q->rear = (q->rear + 1) % MAX_QUEUE_SIZE;
+    q->data[q->rear] = p;
+    q->count++;
+    return true;
+}
+
+bool circularDequeue(CircularQueue *q, Passenger *p) {
+    if (isCircularQueueEmpty(q)) return false;
+    *p = q->data[q->front];
+    q->front = (q->front + 1) % MAX_QUEUE_SIZE;
+    q->count--;
+    return true;
+}
+
+// Parallel Queue
+void initParallelQueue(ParallelQueue *q) {
+    for (int i = 0; i < NUM_SECURITY_LANES; i++) {
+        initFifoQueue(&q->lanes[i]);
+        q->processedCount[i] = 0;
+    }
+}
+
+int findShortestLane(ParallelQueue *q) {
+    int minSize = MAX_QUEUE_SIZE + 1, minIndex = 0;
+    for (int i = 0; i < NUM_SECURITY_LANES; i++) {
+        if (q->lanes[i].size < minSize) {
+            minSize = q->lanes[i].size;
+            minIndex = i;
+        }
+    }
+    return minIndex;
+}
+
+bool parallelEnqueue(ParallelQueue *q, Passenger p) {
+    int lane = findShortestLane(q);
+    return fifoEnqueue(&q->lanes[lane], p);
+}
+
+// Round Robin
+void initRoundRobinQueue(RoundRobinQueue *q) {
+    for (int i = 0; i < NUM_BOARDING_ZONES; i++) initCircularQueue(&q->zones[i]);
+    q->currentZone = 0;
+}
+
+bool roundRobinEnqueue(RoundRobinQueue *q, Passenger p) {
+    return circularEnqueue(&q->zones[p.boardingZone], p);
+}
+
+bool roundRobinDequeue(RoundRobinQueue *q, Passenger *p) {
+    int start = q->currentZone;
+    do {
+        if (!isCircularQueueEmpty(&q->zones[q->currentZone])) {
+            bool res = circularDequeue(&q->zones[q->currentZone], p);
+            q->currentZone = (q->currentZone + 1) % NUM_BOARDING_ZONES;
+            return res;
+        }
+        q->currentZone = (q->currentZone + 1) % NUM_BOARDING_ZONES;
+    } while (q->currentZone != start);
+    return false;
+}
+
+// Random Generator for Arduino
+uint32_t get_rand_32() {
+    return millis() + random(100000);  // Use millis() to simulate changing randomness
+}
+
+// Initialization
+void initSystem() {
+    initFifoQueue(&selfCheckInQueue);
+    initPriorityQueue(&mainCheckInQueue);
+    initCircularQueue(&baggageQueue);
+    initParallelQueue(&securityQueue);
+    initRoundRobinQueue(&boardingQueue);
+
+    for (int i = 0; i < MAX_PASSENGERS; i++) {
+        Passenger p;
+        p.id = i + 1;
+        int r = get_rand_32() % 10;
+        p.priority = (r == 0) ? VIP_PRIORITY : (r < 3) ? BUSINESS_PRIORITY : REGULAR_PRIORITY;
+        p.processingTime = (get_rand_32() % 3) + 1;
+        p.remainingTime = p.processingTime;
+        p.waitingTime = 0;
+        p.hasBaggage = (get_rand_32() % 10 > 2);
+        p.status = STATUS_ARRIVED;
+        p.boardingZone = get_rand_32() % NUM_BOARDING_ZONES;
+
+        if (get_rand_32() % 10 < 3)
+            fifoEnqueue(&selfCheckInQueue, p);
+        else
+            priorityEnqueue(&mainCheckInQueue, p);
+
+        totalPassengers++;
+    }
+}
+
+// Processing Stages
+void processCheckIn() {
+    Passenger p;
+    if (fifoDequeue(&selfCheckInQueue, &p) || priorityDequeue(&mainCheckInQueue, &p)) {
+        p.status = STATUS_CHECKED_IN;
+        checkedInPassengers++;
+        if (p.hasBaggage) {
+            circularEnqueue(&baggageQueue, p);
+        } else {
+            parallelEnqueue(&securityQueue, p);
+        }
+    }
+}
+
+void processBaggageDrop() {
+    Passenger p;
+    if (circularDequeue(&baggageQueue, &p)) {
+        p.status = STATUS_BAGGAGE_DROPPED;
+        baggageDroppedPassengers++;
+        parallelEnqueue(&securityQueue, p);
+    }
+}
+
+void processSecurityScreening() {
+    for (int i = 0; i < NUM_SECURITY_LANES; i++) {
+        if (!isFifoQueueEmpty(&securityQueue.lanes[i])) {
+            Passenger *p = &securityQueue.lanes[i].data[securityQueue.lanes[i].front];
+            int t = (p->remainingTime > TIME_QUANTUM) ? TIME_QUANTUM : p->remainingTime;
+            p->remainingTime -= t;
+            if (p->remainingTime <= 0) {
+                Passenger done;
+                fifoDequeue(&securityQueue.lanes[i], &done);
+                done.status = STATUS_SECURITY_CLEARED;
+                securityClearedPassengers++;
+                securityQueue.processedCount[i]++;
+                roundRobinEnqueue(&boardingQueue, done);
+            }
+        }
+    }
+}
+
+void processBoarding() {
+    Passenger p;
+    if (roundRobinDequeue(&boardingQueue, &p)) {
+        p.status = STATUS_BOARDED;
+        boardedPassengers++;
+    }
+}
+
+void displaySystemStatus() {
+    Serial.printf("\n--- Time %d ---\n", currentTime);
+    Serial.printf("Total: %d | Checked-in: %d | Baggage: %d | Cleared: %d | Boarded: %d\n",
+                  totalPassengers, checkedInPassengers, baggageDroppedPassengers,
+                  securityClearedPassengers, boardedPassengers);
+}
+
+void setup() {
+    Serial.begin(115200);
+    while (!Serial);
+    delay(2000);
+
+    Serial.println("Airport Queue System Initialized\n");
+
+    initSystem();
+    displaySystemStatus();
+}
+
+void loop() {
+    if (boardedPassengers < totalPassengers) {
+        currentTime++;
+        processCheckIn();
+        processBaggageDrop();
+        processSecurityScreening();
+        processBoarding();
+
+        if (currentTime % 5 == 0)
+            displaySystemStatus();
+
+        if (currentTime > 1000) {
+            Serial.printf("Simulation exceeded time limit (%d units).\n", currentTime);
+            while (true); // Stop execution
+        }
+
+        delay(100);
+    } else {
+        Serial.printf("Simulation complete in %d time units.\n", currentTime);
+        while (true); // Stop execution
+    }
+}
