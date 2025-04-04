@@ -1,0 +1,133 @@
+#include <Arduino.h>
+
+#define MAX_SIZE 10
+
+typedef struct {
+  int items[MAX_SIZE];
+  int front;
+  int rear;
+} FifoQueue;
+
+void initQueue(FifoQueue *q) {
+  q->front = -1;
+  q->rear = -1;
+}
+
+bool isEmpty(FifoQueue *q) {
+  return q->front == -1;
+}
+
+bool isFull(FifoQueue *q) {
+  return (q->rear == MAX_SIZE - 1);
+}
+
+bool enqueue(FifoQueue *q, int value) {
+  if (isFull(q)) {
+    Serial.println("Queue is full");
+    return false;
+  }
+  
+  if (isEmpty(q)) {
+    q->front = 0;
+  }
+  
+  q->rear++;
+  q->items[q->rear] = value;
+  return true;
+}
+
+bool dequeue(FifoQueue *q, int *value) {
+  if (isEmpty(q)) {
+    Serial.println("Queue is empty");
+    return false;
+  }
+  
+  *value = q->items[q->front];
+  
+  if (q->front == q->rear) {
+    q->front = -1;
+    q->rear = -1;
+  } else {
+    q->front++;
+  }
+  
+  return true;
+}
+
+int peek(FifoQueue *q) {
+  if (isEmpty(q)) {
+    Serial.println("Queue is empty");
+    return -1;
+  }
+  
+  return q->items[q->front];
+}
+
+void displayQueue(FifoQueue *q) {
+  if (isEmpty(q)) {
+    Serial.println("Queue is empty");
+    return;
+  }
+  
+  Serial.print("Queue elements: ");
+  for (int i = q->front; i <= q->rear; i++) {
+    Serial.print(q->items[i]);
+    Serial.print(" ");
+  }
+  Serial.println();
+}
+
+FifoQueue queue;
+
+void setup() {
+  Serial.begin(9600);
+  while (!Serial) {}
+  
+  Serial.println("FIFO Queue Example");
+  
+  initQueue(&queue);
+  
+  Serial.println("Adding elements: 10,20,30,40,50");
+  enqueue(&queue, 10);
+  enqueue(&queue, 20);
+  enqueue(&queue, 30);
+  enqueue(&queue, 40);
+  enqueue(&queue, 50);
+  
+  displayQueue(&queue);
+  
+  int value;
+  Serial.println("Removing 2 elements");
+  dequeue(&queue, &value);
+  Serial.print("Dequeued: ");
+  Serial.println(value);
+  dequeue(&queue, &value);
+  Serial.print("Dequeued: ");
+  Serial.println(value);
+  
+  displayQueue(&queue);
+  
+  Serial.print("Front element: ");
+  Serial.println(peek(&queue));
+  
+  Serial.println("Adding more elements: 60,70");
+  enqueue(&queue, 60);
+  enqueue(&queue, 70);
+  
+  displayQueue(&queue);
+  
+  Serial.println("Removing all elements");
+  while (!isEmpty(&queue)) {
+    dequeue(&queue, &value);
+    Serial.print("Dequeued: ");
+    Serial.println(value);
+    displayQueue(&queue);
+  }
+  
+  Serial.println("Trying to dequeue from empty queue");
+  dequeue(&queue, &value);
+}
+
+void loop() {
+  delay(1000);
+}
