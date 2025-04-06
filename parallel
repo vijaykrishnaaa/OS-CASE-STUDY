@@ -1,4 +1,6 @@
 #include <Arduino.h>
+#include <FreeRTOS.h>
+#include <task.h>
 
 #define MAX_QUEUE_SIZE 10
 #define NUM_QUEUES 3
@@ -35,10 +37,8 @@ bool isFull(Queue *q) {
 }
 
 bool enqueue(Queue *q, int value) {
-  if (isFull(q)) {
-    return false;
-  }
-  
+  if (isFull(q)) return false;
+
   q->rear = (q->rear + 1) % MAX_QUEUE_SIZE;
   q->items[q->rear] = value;
   q->count++;
@@ -46,10 +46,8 @@ bool enqueue(Queue *q, int value) {
 }
 
 bool dequeue(Queue *q, int *value) {
-  if (isEmpty(q)) {
-    return false;
-  }
-  
+  if (isEmpty(q)) return false;
+
   *value = q->items[q->front];
   q->front = (q->front + 1) % MAX_QUEUE_SIZE;
   q->count--;
@@ -64,25 +62,21 @@ void displayQueue(Queue *q) {
     Serial.println(": Empty");
     return;
   }
-  
+
   Serial.print("Queue ");
   Serial.print(q->queueNumber);
   Serial.print(": [");
-  
+
   int i = q->front;
   int itemsToDisplay = q->count;
-  
+
   while (itemsToDisplay > 0) {
     Serial.print(q->items[i]);
-    
     itemsToDisplay--;
-    if (itemsToDisplay > 0) {
-      Serial.print(", ");
-    }
-    
+    if (itemsToDisplay > 0) Serial.print(", ");
     i = (i + 1) % MAX_QUEUE_SIZE;
   }
-  
+
   Serial.println("]");
 }
 
@@ -97,14 +91,14 @@ void displayAllQueues() {
 int findShortestQueue() {
   int minLength = MAX_QUEUE_SIZE;
   int minIndex = 0;
-  
+
   for (int i = 0; i < NUM_QUEUES; i++) {
     if (queues[i].count < minLength) {
       minLength = queues[i].count;
       minIndex = i;
     }
   }
-  
+
   return minIndex;
 }
 
@@ -140,7 +134,7 @@ void printStats() {
   Serial.println(totalItems);
   Serial.print("Total items processed: ");
   Serial.println(processedItems);
-  
+
   Serial.println("\nItems processed per queue:");
   for (int i = 0; i < NUM_QUEUES; i++) {
     Serial.print("Queue ");
@@ -148,7 +142,7 @@ void printStats() {
     Serial.print(": ");
     Serial.print(queues[i].processedItems);
     Serial.print(" items (");
-    
+
     if (totalItems > 0) {
       float percentage = (float)queues[i].processedItems / totalItems * 100;
       Serial.print(percentage);
@@ -159,43 +153,61 @@ void printStats() {
   }
 }
 
-void setup() {
-  Serial.begin(9600);
-  while (!Serial) {}
-  
-  randomSeed(analogRead(0));
-  
+void vParallelQueueTask(void *pvParameters) {
+  (void)pvParameters;
+
   Serial.println("Parallel Queue System");
   initQueues();
-  
+
   Serial.println("Adding items to queues...");
   for (int i = 1; i <= 20; i++) {
     addItem(i);
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
-  
+
   displayAllQueues();
-  
+
   Serial.println("Processing items from queues...");
   for (int i = 0; i < 5; i++) {
     processQueues();
     displayAllQueues();
+    vTaskDelay(pdMS_TO_TICKS(500));
   }
-  
+
   Serial.println("Adding more items...");
   for (int i = 21; i <= 30; i++) {
     addItem(i);
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
-  
+
   displayAllQueues();
-  
+
   Serial.println("Processing remaining items...");
   while (processedItems < totalItems) {
     processQueues();
+    vTaskDelay(pdMS_TO_TICKS(300));
   }
-  
+
   printStats();
+
+  vTaskDelete(NULL);
+}
+
+void setup() {
+  Serial.begin(9600);
+  while (!Serial) {}
+
+  randomSeed(analogRead(0));
+
+  xTaskCreate(
+    vParallelQueueTask,
+    "ParallelQueueTask",
+    2048,
+    NULL,
+    1,
+    NULL
+  );
 }
 
 void loop() {
-  delay(1000);
 }
