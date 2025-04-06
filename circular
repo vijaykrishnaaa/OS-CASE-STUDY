@@ -1,4 +1,6 @@
 #include <Arduino.h>
+#include <FreeRTOS.h>
+#include <task.h>
 
 #define MAX_SIZE 10
 
@@ -8,6 +10,8 @@ typedef struct {
   int rear;
   int count;
 } CircularQueue;
+
+CircularQueue queue;
 
 void initQueue(CircularQueue *q) {
   q->front = 0;
@@ -28,7 +32,7 @@ bool enqueue(CircularQueue *q, int value) {
     Serial.println("Queue is full");
     return false;
   }
-  
+
   q->rear = (q->rear + 1) % MAX_SIZE;
   q->items[q->rear] = value;
   q->count++;
@@ -40,7 +44,7 @@ bool dequeue(CircularQueue *q, int *value) {
     Serial.println("Queue is empty");
     return false;
   }
-  
+
   *value = q->items[q->front];
   q->front = (q->front + 1) % MAX_SIZE;
   q->count--;
@@ -60,36 +64,32 @@ void displayQueue(CircularQueue *q) {
     Serial.println("Queue is empty");
     return;
   }
-  
+
   Serial.print("Queue elements: ");
-  int i, index;
-  for (i = 0; i < q->count; i++) {
-    index = (q->front + i) % MAX_SIZE;
+  for (int i = 0; i < q->count; i++) {
+    int index = (q->front + i) % MAX_SIZE;
     Serial.print(q->items[index]);
     Serial.print(" ");
   }
   Serial.println();
 }
 
-CircularQueue queue;
+void vQueueTask(void *pvParameters) {
+  (void)pvParameters;
 
-void setup() {
-  Serial.begin(9600);
-  while (!Serial) {}
-  
-  Serial.println("Circular Queue Example");
-  
   initQueue(&queue);
-  
+
+  Serial.println("Circular Queue Example");
+
   Serial.println("Adding elements: 1,2,3,4,5");
   enqueue(&queue, 1);
   enqueue(&queue, 2);
   enqueue(&queue, 3);
   enqueue(&queue, 4);
   enqueue(&queue, 5);
-  
+
   displayQueue(&queue);
-  
+
   int value;
   Serial.println("Removing 2 elements");
   dequeue(&queue, &value);
@@ -98,27 +98,43 @@ void setup() {
   dequeue(&queue, &value);
   Serial.print("Dequeued: ");
   Serial.println(value);
-  
+
   displayQueue(&queue);
-  
+
   Serial.println("Adding elements: 6,7,8");
   enqueue(&queue, 6);
   enqueue(&queue, 7);
   enqueue(&queue, 8);
-  
+
   displayQueue(&queue);
-  
+
   Serial.print("Front element: ");
   Serial.println(peek(&queue));
-  
+
   Serial.println("Removing all elements");
   while (dequeue(&queue, &value)) {
     Serial.print("Dequeued: ");
     Serial.println(value);
     displayQueue(&queue);
+    vTaskDelay(pdMS_TO_TICKS(500));
   }
+
+  vTaskDelete(NULL);
+}
+
+void setup() {
+  Serial.begin(9600);
+  while (!Serial) {}
+
+  xTaskCreate(
+    vQueueTask,
+    "QueueTask",
+    1024,
+    NULL,
+    1,
+    NULL
+  );
 }
 
 void loop() {
-  delay(1000);
 }
