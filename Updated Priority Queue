@@ -1,0 +1,117 @@
+#include <Arduino.h>
+#include <FreeRTOS.h>
+#include <task.h>
+
+#define MAX_QUEUE_SIZE 20
+
+typedef struct {
+  int data;
+  int priority;
+} QueueElement;
+
+typedef struct {
+  QueueElement elements[MAX_QUEUE_SIZE];
+  int size;
+} PriorityQueue;
+
+PriorityQueue queue;
+
+void initQueue(PriorityQueue *queue) {
+  queue->size = 0;
+}
+
+bool isEmpty(PriorityQueue *queue) {
+  return queue->size == 0;
+}
+
+bool isFull(PriorityQueue *queue) {
+  return queue->size == MAX_QUEUE_SIZE;
+}
+
+bool enqueue(PriorityQueue *queue, int data, int priority) {
+  if (isFull(queue)) {
+    Serial.println("Queue is full");
+    return false;
+  }
+
+  int i;
+  for (i = queue->size - 1; i >= 0; i--) {
+    if (queue->elements[i].priority <= priority) break;
+    queue->elements[i + 1] = queue->elements[i];
+  }
+
+  queue->elements[i + 1].data = data;
+  queue->elements[i + 1].priority = priority;
+  queue->size++;
+  return true;
+}
+
+bool dequeue(PriorityQueue *queue, int *data) {
+  if (isEmpty(queue)) {
+    Serial.println("Queue is empty");
+    return false;
+  }
+
+  *data = queue->elements[0].data;
+
+  for (int i = 0; i < queue->size - 1; i++) {
+    queue->elements[i] = queue->elements[i + 1];
+  }
+
+  queue->size--;
+  return true;
+}
+
+void displayQueue(PriorityQueue *queue) {
+  if (isEmpty(queue)) {
+    Serial.println("Queue is empty");
+    return;
+  }
+
+  Serial.println("Priority Queue:");
+  for (int i = 0; i < queue->size; i++) {
+    Serial.print(queue->elements[i].data);
+    Serial.print("\t");
+    Serial.println(queue->elements[i].priority);
+  }
+}
+
+void vPriorityQueueTask(void *pvParameters) {
+  (void)pvParameters;
+
+  initQueue(&queue);
+
+  enqueue(&queue, 10, 2);
+  enqueue(&queue, 20, 1);
+  enqueue(&queue, 30, 3);
+  enqueue(&queue, 40, 1);
+
+  displayQueue(&queue);
+
+  int data;
+  Serial.println("Dequeuing:");
+  while (dequeue(&queue, &data)) {
+    Serial.print("Dequeued: ");
+    Serial.println(data);
+    displayQueue(&queue);
+    vTaskDelay(pdMS_TO_TICKS(500));
+  }
+
+  vTaskDelete(NULL);
+}
+
+void setup() {
+  Serial.begin(9600);
+  while (!Serial) {}
+
+  xTaskCreate(
+    vPriorityQueueTask,
+    "PriorityQueueTask",
+    1024,
+    NULL,
+    1,
+    NULL
+  );
+}
+
+void loop() {}
