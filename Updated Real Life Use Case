@@ -1,0 +1,270 @@
+#include <Arduino.h>
+#include <FreeRTOS.h>
+#include <task.h>
+
+#define MAX_PASSENGERS 30
+#define MAX_QUEUE_SIZE 20
+#define NUM_SECURITY_LANES 2
+#define NUM_BOARDING_ZONES 4
+#define TIME_QUANTUM 2
+
+#define VIP_PRIORITY 1
+#define BUSINESS_PRIORITY 2
+#define REGULAR_PRIORITY 3
+
+#define STATUS_ARRIVED 0
+#define STATUS_CHECKED_IN 1
+#define STATUS_BAGGAGE_DROPPED 2
+#define STATUS_SECURITY_CLEARED 3
+#define STATUS_BOARDED 4
+
+typedef struct {
+  int id;
+  int priority;
+  int processingTime;
+  int remainingTime;
+  bool hasBaggage;
+  int status;
+  int boardingZone;
+} Passenger;
+
+typedef struct {
+  Passenger data[MAX_QUEUE_SIZE];
+  int front, rear, size;
+} FifoQueue;
+
+typedef struct {
+  Passenger data[MAX_QUEUE_SIZE];
+  int size;
+} PriorityQueue;
+
+typedef struct {
+  Passenger data[MAX_QUEUE_SIZE];
+  int front, rear, count;
+} CircularQueue;
+
+typedef struct {
+  FifoQueue lanes[NUM_SECURITY_LANES];
+} ParallelQueue;
+
+typedef struct {
+  CircularQueue zones[NUM_BOARDING_ZONES];
+  int currentZone;
+} RoundRobinQueue;
+
+FifoQueue selfCheckInQueue;
+PriorityQueue mainCheckInQueue;
+CircularQueue baggageQueue;
+ParallelQueue securityQueue;
+RoundRobinQueue boardingQueue;
+
+int totalPassengers = 0;
+int checkedInPassengers = 0;
+int baggageDroppedPassengers = 0;
+int securityClearedPassengers = 0;
+int boardedPassengers = 0;
+
+void initFifoQueue(FifoQueue *q) {
+  q->front = 0; q->rear = -1; q->size = 0;
+}
+bool fifoEnqueue(FifoQueue *q, Passenger p) {
+  if (q->size >= MAX_QUEUE_SIZE) return false;
+  q->rear = (q->rear + 1) % MAX_QUEUE_SIZE;
+  q->data[q->rear] = p;
+  q->size++;
+  return true;
+}
+bool fifoDequeue(FifoQueue *q, Passenger *p) {
+  if (q->size == 0) return false;
+  *p = q->data[q->front];
+  q->front = (q->front + 1) % MAX_QUEUE_SIZE;
+  q->size--;
+  return true;
+}
+
+void initPriorityQueue(PriorityQueue *q) { q->size = 0; }
+bool priorityEnqueue(PriorityQueue *q, Passenger p) {
+  if (q->size >= MAX_QUEUE_SIZE) return false;
+  int i = q->size - 1;
+  while (i >= 0 && q->data[i].priority > p.priority) {
+    q->data[i + 1] = q->data[i];
+    i--;
+  }
+  q->data[i + 1] = p;
+  q->size++;
+  return true;
+}
+bool priorityDequeue(PriorityQueue *q, Passenger *p) {
+  if (q->size == 0) return false;
+  *p = q->data[0];
+  for (int i = 1; i < q->size; i++) q->data[i - 1] = q->data[i];
+  q->size--;
+  return true;
+}
+
+void initCircularQueue(CircularQueue *q) {
+  q->front = 0; q->rear = -1; q->count = 0;
+}
+bool circularEnqueue(CircularQueue *q, Passenger p) {
+  if (q->count >= MAX_QUEUE_SIZE) return false;
+  q->rear = (q->rear + 1) % MAX_QUEUE_SIZE;
+  q->data[q->rear] = p;
+  q->count++;
+  return true;
+}
+bool circularDequeue(CircularQueue *q, Passenger *p) {
+  if (q->count == 0) return false;
+  *p = q->data[q->front];
+  q->front = (q->front + 1) % MAX_QUEUE_SIZE;
+  q->count--;
+  return true;
+}
+
+void initParallelQueue(ParallelQueue *q) {
+  for (int i = 0; i < NUM_SECURITY_LANES; i++) {
+    initFifoQueue(&q->lanes[i]);
+  }
+}
+int findShortestLane(ParallelQueue *q) {
+  int min = MAX_QUEUE_SIZE + 1, idx = 0;
+  for (int i = 0; i < NUM_SECURITY_LANES; i++) {
+    if (q->lanes[i].size < min) {
+      min = q->lanes[i].size;
+      idx = i;
+    }
+  }
+  return idx;
+}
+bool parallelEnqueue(ParallelQueue *q, Passenger p) {
+  return fifoEnqueue(&q->lanes[findShortestLane(q)], p);
+}
+
+void initRoundRobinQueue(RoundRobinQueue *q) {
+  for (int i = 0; i < NUM_BOARDING_ZONES; i++) initCircularQueue(&q->zones[i]);
+  q->currentZone = 0;
+}
+bool roundRobinEnqueue(RoundRobinQueue *q, Passenger p) {
+  return circularEnqueue(&q->zones[p.boardingZone], p);
+}
+bool roundRobinDequeue(RoundRobinQueue *q, Passenger *p) {
+  int start = q->currentZone;
+  do {
+    if (q->zones[q->currentZone].count > 0) {
+      bool result = circularDequeue(&q->zones[q->currentZone], p);
+      q->currentZone = (q->currentZone + 1) % NUM_BOARDING_ZONES;
+      return result;
+    }
+    q->currentZone = (q->currentZone + 1) % NUM_BOARDING_ZONES;
+  } while (q->currentZone != start);
+  return false;
+}
+
+void initializePassengers() {
+  for (int i = 0; i < MAX_PASSENGERS; i++) {
+    Passenger p;
+    p.id = i + 1;
+    p.priority = (random(10) < 2) ? VIP_PRIORITY : ((random(10) < 5) ? BUSINESS_PRIORITY : REGULAR_PRIORITY);
+    p.processingTime = random(1, 4);
+    p.remainingTime = p.processingTime;
+    p.hasBaggage = random(10) > 3;
+    p.status = STATUS_ARRIVED;
+    p.boardingZone = random(NUM_BOARDING_ZONES);
+
+    if (random(10) < 4)
+      fifoEnqueue(&selfCheckInQueue, p);
+    else
+      priorityEnqueue(&mainCheckInQueue, p);
+
+    totalPassengers++;
+  }
+}
+
+void checkInTask(void *pvParameters) {
+  while (1) {
+    Passenger p;
+    if (fifoDequeue(&selfCheckInQueue, &p) || priorityDequeue(&mainCheckInQueue, &p)) {
+      p.status = STATUS_CHECKED_IN;
+      checkedInPassengers++;
+      if (p.hasBaggage)
+        circularEnqueue(&baggageQueue, p);
+      else
+        parallelEnqueue(&securityQueue, p);
+    }
+    vTaskDelay(200 / portTICK_PERIOD_MS);
+  }
+}
+
+void baggageTask(void *pvParameters) {
+  while (1) {
+    Passenger p;
+    if (circularDequeue(&baggageQueue, &p)) {
+      p.status = STATUS_BAGGAGE_DROPPED;
+      baggageDroppedPassengers++;
+      parallelEnqueue(&securityQueue, p);
+    }
+    vTaskDelay(300 / portTICK_PERIOD_MS);
+  }
+}
+
+void securityTask(void *pvParameters) {
+  while (1) {
+    for (int i = 0; i < NUM_SECURITY_LANES; i++) {
+      if (securityQueue.lanes[i].size > 0) {
+        Passenger *p = &securityQueue.lanes[i].data[securityQueue.lanes[i].front];
+        int t = min(TIME_QUANTUM, p->remainingTime);
+        p->remainingTime -= t;
+        if (p->remainingTime <= 0) {
+          Passenger done;
+          fifoDequeue(&securityQueue.lanes[i], &done);
+          done.status = STATUS_SECURITY_CLEARED;
+          securityClearedPassengers++;
+          roundRobinEnqueue(&boardingQueue, done);
+        }
+      }
+    }
+    vTaskDelay(400 / portTICK_PERIOD_MS);
+  }
+}
+
+void boardingTask(void *pvParameters) {
+  while (1) {
+    Passenger p;
+    if (roundRobinDequeue(&boardingQueue, &p)) {
+      p.status = STATUS_BOARDED;
+      boardedPassengers++;
+    }
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+  }
+}
+
+void monitorTask(void *pvParameters) {
+  while (1) {
+    Serial.printf("Checked-In: %d | Baggage: %d | Cleared: %d | Boarded: %d\n",
+      checkedInPassengers, baggageDroppedPassengers, securityClearedPassengers, boardedPassengers);
+    if (boardedPassengers >= totalPassengers) {
+      Serial.println("Simulation Complete.");
+      vTaskSuspend(NULL);
+    }
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(2000);
+
+  initFifoQueue(&selfCheckInQueue);
+  initPriorityQueue(&mainCheckInQueue);
+  initCircularQueue(&baggageQueue);
+  initParallelQueue(&securityQueue);
+  initRoundRobinQueue(&boardingQueue);
+  initializePassengers();
+
+  xTaskCreate(checkInTask, "CheckIn", 1000, NULL, 1, NULL);
+  xTaskCreate(baggageTask, "Baggage", 1000, NULL, 1, NULL);
+  xTaskCreate(securityTask, "Security", 1000, NULL, 1, NULL);
+  xTaskCreate(boardingTask, "Boarding", 1000, NULL, 1, NULL);
+  xTaskCreate(monitorTask, "Monitor", 1000, NULL, 1, NULL);
+}
+
+void loop() {}
