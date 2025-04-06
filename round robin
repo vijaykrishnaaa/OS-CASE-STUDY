@@ -1,4 +1,6 @@
 #include <Arduino.h>
+#include <FreeRTOS.h>
+#include <task.h>
 
 #define MAX_PROCESSES 10
 #define TIME_QUANTUM 2
@@ -20,12 +22,14 @@ typedef struct {
   int size;
 } RoundRobinQueue;
 
+RoundRobinQueue queue;
+
 void initQueue(RoundRobinQueue *q, int size) {
   q->front = 0;
   q->rear = -1;
   q->count = 0;
   q->size = size;
-  
+
   for (int i = 0; i < size; i++) {
     q->processes[i].id = i + 1;
     q->processes[i].completed = false;
@@ -43,10 +47,7 @@ bool isFull(RoundRobinQueue *q) {
 }
 
 void enqueue(RoundRobinQueue *q, Process p) {
-  if (isFull(q)) {
-    return;
-  }
-  
+  if (isFull(q)) return;
   q->rear = (q->rear + 1) % MAX_PROCESSES;
   q->processes[q->rear] = p;
   q->count++;
@@ -70,89 +71,90 @@ void displayProcessInfo(Process p) {
   Serial.println(p.turnaroundTime);
 }
 
-void executeRoundRobin(RoundRobinQueue *q) {
-  int currentTime = 0;
-  int completed = 0;
-  Process current;
-  
-  Serial.println("Executing Round Robin with time quantum: " + String(TIME_QUANTUM));
-  
-  while (completed < q->size) {
-    if (isEmpty(q)) {
-      currentTime++;
-      continue;
-    }
-    
-    current = dequeue(q);
-    
-    Serial.print("Time ");
-    Serial.print(currentTime);
-    Serial.print(": Executing Process ");
-    Serial.println(current.id);
-    
-    int executionTime = min(TIME_QUANTUM, current.remainingTime);
-    current.remainingTime -= executionTime;
-    currentTime += executionTime;
-    
-    for (int i = q->front; i != (q->rear + 1) % MAX_PROCESSES && q->count > 0; i = (i + 1) % MAX_PROCESSES) {
-      q->processes[i].waitingTime += executionTime;
-    }
-    
-    if (current.remainingTime > 0) {
-      enqueue(q, current);
-    } else {
-      current.completed = true;
-      current.turnaroundTime = currentTime;
-      completed++;
-      
-      Serial.print("Process ");
-      Serial.print(current.id);
-      Serial.println(" completed");
-    }
-  }
-  
-  Serial.println("All processes completed");
-}
-
 void displayResults(RoundRobinQueue *q) {
   float avgWaitingTime = 0;
   float avgTurnaroundTime = 0;
-  
+
   Serial.println("\nProcess Results:");
   for (int i = 0; i < q->size; i++) {
     displayProcessInfo(q->processes[i]);
     avgWaitingTime += q->processes[i].waitingTime;
     avgTurnaroundTime += q->processes[i].turnaroundTime;
   }
-  
+
   avgWaitingTime /= q->size;
   avgTurnaroundTime /= q->size;
-  
+
   Serial.print("\nAverage Waiting Time: ");
   Serial.println(avgWaitingTime);
   Serial.print("Average Turnaround Time: ");
   Serial.println(avgTurnaroundTime);
 }
 
-void setup() {
-  Serial.begin(9600);
-  while (!Serial) {}
-  
+void executeRoundRobin(RoundRobinQueue *q) {
+  int currentTime = 0;
+  int completed = 0;
+  Process current;
+
+  Serial.println("Executing Round Robin with time quantum: " + String(TIME_QUANTUM));
+
+  while (completed < q->size) {
+    if (isEmpty(q)) {
+      currentTime++;
+      continue;
+    }
+
+    current = dequeue(q);
+
+    Serial.print("Time ");
+    Serial.print(currentTime);
+    Serial.print(": Executing Process ");
+    Serial.println(current.id);
+
+    int executionTime = min(TIME_QUANTUM, current.remainingTime);
+    current.remainingTime -= executionTime;
+    currentTime += executionTime;
+
+    for (int i = q->front, count = 0; count < q->count; count++) {
+      q->processes[i].waitingTime += executionTime;
+      i = (i + 1) % MAX_PROCESSES;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    if (current.remainingTime > 0) {
+      enqueue(q, current);
+    } else {
+      current.completed = true;
+      current.turnaroundTime = currentTime;
+      queue.processes[current.id - 1] = current;
+      completed++;
+
+      Serial.print("Process ");
+      Serial.print(current.id);
+      Serial.println(" completed");
+    }
+  }
+
+  Serial.println("All processes completed");
+}
+
+void vRoundRobinTask(void *pvParameters) {
+  (void)pvParameters;
+
   Serial.println("Round Robin Scheduling Algorithm");
-  
-  RoundRobinQueue queue;
+
   int numProcesses = 4;
-  
-  initQueue(&queue, numProcesses);
-  
   int burstTimes[4] = {10, 5, 8, 12};
-  
+
+  initQueue(&queue, numProcesses);
+
   for (int i = 0; i < numProcesses; i++) {
     queue.processes[i].burstTime = burstTimes[i];
     queue.processes[i].remainingTime = burstTimes[i];
     enqueue(&queue, queue.processes[i]);
   }
-  
+
   Serial.println("Initial Process Information:");
   for (int i = 0; i < numProcesses; i++) {
     Serial.print("Process ");
@@ -160,11 +162,26 @@ void setup() {
     Serial.print(": Burst Time = ");
     Serial.println(burstTimes[i]);
   }
-  
+
   executeRoundRobin(&queue);
   displayResults(&queue);
+
+  vTaskDelete(NULL);
+}
+
+void setup() {
+  Serial.begin(9600);
+  while (!Serial) {}
+
+  xTaskCreate(
+    vRoundRobinTask,
+    "RoundRobinTask",
+    2048,
+    NULL,
+    1,
+    NULL
+  );
 }
 
 void loop() {
-  delay(1000);
 }
