@@ -120,13 +120,13 @@ void vFifoQueueTask(void *pvParameters) {
     Serial.print("Dequeued: ");
     Serial.println(value);
     displayQueue(&queue);
-    vTaskDelay(pdMS_TO_TICKS(500)); // Delay 500 ms between dequeues
+    vTaskDelay(pdMS_TO_TICKS(500));
   }
 
   Serial.println("Trying to dequeue from empty queue");
   dequeue(&queue, &value);
 
-  vTaskDelete(NULL); // End the task
+  vTaskDelete(NULL);
 }
 
 void setup() {
